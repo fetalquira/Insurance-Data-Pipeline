@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+from typing import Literal, Optional
 from mangum import Mangum
 import boto3
 import json
@@ -22,9 +23,52 @@ app.add_middleware(
 # 2. Define the Data Contract (Pydantic)
 # If a user tries to send an age as "Twenty", this will automatically reject it.
 class QuoteRequest(BaseModel):
-    first_name: str
-    age: int
-    has_prior_claims: bool
+    # Part 1: Application for Insurance
+    # Personal Information of the Proposed Insured
+
+    # Full name of the Insured
+    first_name_insured: str = Field(..., min_length=2, max_length=100)
+    last_name_insured: str = Field(..., min_length=2, max_length=100)
+    middle_name_insured: str = Field(..., min_length=2, max_length=100)
+
+    # We use Literal to restrict the choices
+    gender_insured: Literal["Male", "Female"]
+
+    # Case-Insensitive Validator for Gender
+    # field_validator decorator acts as a security guard at a gate
+    @field_validator('gender_insured', mode='before')
+    @classmethod
+    def normalize_gender(cls, v: str) -> str:
+        if isinstance(v, str):
+            # Convert "male", "MALE", " Male " -> "Male"
+            capitalized = v.strip().capitalize()
+            return capitalized
+        return v
+
+    # We use Optional to ensure the field is valid even if empty
+    honorific_insured: Optional[Literal["Mr.", "Ms.", "Mrs.", "Dr.", "Prof."]] = Field(
+        None,
+        description="The insured's legal title"
+    )
+
+    @field_validator('honorific_insured', mode='before')
+    @classmethod
+    def clean_honorific(cls, v: str) -> str:
+        if not isinstance(v, str):
+            return v
+        
+        name_map = {
+            "mr": "Mr.",
+            "mrs": "Mrs.",
+            "ms": "Ms.",
+            "dr": "Dr.",
+            "prof": "Prof."
+        }
+        lookup = v.strip().lower().replace(".","")
+        return name_map.get(lookup, v)
+
+    age_insured: int
+    has_prior_claims_insured: bool
 
 # 3. Setup the AWS S3 Connection
 # Boto3 will automatically use the IAM Role we attach to the Lambda function later!
