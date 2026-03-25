@@ -1,12 +1,24 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
-from typing import Literal, Optional
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+    BeforeValidator,
+    AfterValidator
+)
+from typing import (
+    Literal,
+    Optional,
+    Annotated,
+    Any
+)
 from mangum import Mangum
 import boto3
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, date
+
 
 # 1. Initialize the App
 app = FastAPI(title="Hilaga Timog Cheese Insurance API")
@@ -21,53 +33,85 @@ app.add_middleware(
 )
 
 # 2. Define the Data Contract (Pydantic)
-# If a user tries to send an age as "Twenty", this will automatically reject it.
+# Validator Functions
+def clean_gender_string(v: Any) -> Any:
+    if isinstance(v, str):
+        return v.strip().capitalize()
+    return v
+
+def clean_honorifics(v: Any) -> Any:
+    if not isinstance(v, str):
+        return v
+    
+    name_map = {
+        "mr": "Mr.",
+        "mrs": "Mrs.",
+        "ms": "Ms.",
+        "dr": "Dr.",
+        "prof": "Prof.",
+        "rev": "Rev.",
+        "hon": "Hon.",
+        "engr": "Engr.",
+        "ar": "Ar."
+    }
+    lookup = v.strip().lower().replace(".","")
+    return name_map.get(lookup, v)
+
+def parse_date_strings(v: Any) -> Any:
+    if isinstance(v, str):
+        return v.replace("/", "-")
+    return v
+
+def min_age_validator(min_age: int):
+    def validator(v: date) -> date:
+        today = date.today()
+        # Calculate age precisely
+        age = today.year - v.year - ((today.month, today.day) < (v.month, v.day))
+        
+        if v > today:
+            raise ValueError("Birthdate cannot be in the future.")
+        if age < min_age:
+            raise ValueError(f"Must be at least {min_age} years old for this role.")
+        return v
+    return validator
+
+# Annotations for Reusability
+NameString = Annotated[str, Field(..., min_length=2, max_length=100)]
+Gender = Annotated[
+    Literal["Male", "Female"],
+    BeforeValidator(clean_gender_string),
+    Field(description="Legal gender")
+]
+Honorific = Annotated[
+    Literal["Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Rev.", "Hon.", "Engr.", "Ar."],
+    BeforeValidator(clean_honorifics),
+    Field(description="Legal honorifics")
+]
+BirthDateInsured = Annotated[
+    date,
+    BeforeValidator(parse_date_strings),
+    AfterValidator(min_age_validator(0)),
+    Field(description="Insured can be any age from birth onwards")
+]
+
+# The Model
 class QuoteRequest(BaseModel):
     # Part 1: Application for Insurance
     # Personal Information of the Proposed Insured
 
-    # Full name of the Insured
-    first_name_insured: str = Field(..., min_length=2, max_length=100)
-    last_name_insured: str = Field(..., min_length=2, max_length=100)
-    middle_name_insured: str = Field(..., min_length=2, max_length=100)
+    # Full name of Insured
+    first_name_insured: NameString
+    last_name_insured: NameString
+    middle_name_insured: NameString
 
-    # We use Literal to restrict the choices
-    gender_insured: Literal["Male", "Female"]
+    # Gender of Insured
+    gender_insured: Gender
 
-    # Case-Insensitive Validator for Gender
-    # field_validator decorator acts as a security guard at a gate
-    @field_validator('gender_insured', mode='before')
-    @classmethod
-    def normalize_gender(cls, v: str) -> str:
-        if isinstance(v, str):
-            # Convert "male", "MALE", " Male " -> "Male"
-            capitalized = v.strip().capitalize()
-            return capitalized
-        return v
+    # Honorific of Insured
+    honorific_insured: Honorific
 
-    # We use Optional to ensure the field is valid even if empty
-    honorific_insured: Optional[Literal["Mr.", "Ms.", "Mrs.", "Dr.", "Prof."]] = Field(
-        None,
-        description="The insured's legal title"
-    )
-
-    @field_validator('honorific_insured', mode='before')
-    @classmethod
-    def clean_honorific(cls, v: str) -> str:
-        if not isinstance(v, str):
-            return v
-        
-        name_map = {
-            "mr": "Mr.",
-            "mrs": "Mrs.",
-            "ms": "Ms.",
-            "dr": "Dr.",
-            "prof": "Prof."
-        }
-        lookup = v.strip().lower().replace(".","")
-        return name_map.get(lookup, v)
-
-    age_insured: int
+    # Birthdate of Insured
+    birthdate_insured: BirthDateInsured
     has_prior_claims_insured: bool
 
 # 3. Setup the AWS S3 Connection
@@ -82,7 +126,7 @@ BUCKET_NAME = "hiltim-cheese-insurance"
 async def submit_quote(quote: QuoteRequest):
     try:
         # Convert the validated Pydantic model into a Python dictionary
-        data_dict = quote.model_dump()
+        data_dict = quote.model_dump(mode='json')
         
         # Add a timestamp so we know exactly when this lead came in
         data_dict["timestamp"] = datetime.utcnow().isoformat()
