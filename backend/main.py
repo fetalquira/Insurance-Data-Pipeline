@@ -3,9 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import (
     BaseModel,
     Field,
-    field_validator,
+    StringConstraints,
     BeforeValidator,
-    AfterValidator
+    AfterValidator,
+    computed_field
 )
 from typing import (
     Literal,
@@ -17,6 +18,7 @@ from mangum import Mangum
 import boto3
 import json
 import uuid
+import pycountry
 from datetime import datetime, date
 
 
@@ -34,7 +36,7 @@ app.add_middleware(
 
 # 2. Define the Data Contract (Pydantic)
 # Validator Functions
-def clean_gender_string(v: Any) -> Any:
+def clean_string(v: Any) -> Any:
     if isinstance(v, str):
         return v.strip().capitalize()
     return v
@@ -75,11 +77,27 @@ def min_age_validator(min_age: int):
         return v
     return validator
 
+def validate_country(v: Any) -> str:
+    if not isinstance(v, str):
+        return v
+    
+    lookup = v.strip()
+    try:
+        country = pycountry.countries.lookup(lookup)
+        return country.alpha_3
+    except (LookupError, AttributeError):
+        raise ValueError(f"'{lookup}' is not a recognized ISO country.")
+    
+def strip_id_formatting(v: Any) -> Any:
+    if isinstance(v, str):
+        return v.replace("-", "").replace(" ", "")
+    return v
+
 # Annotations for Reusability
 NameString = Annotated[str, Field(..., min_length=2, max_length=100)]
 Gender = Annotated[
     Literal["Male", "Female"],
-    BeforeValidator(clean_gender_string),
+    BeforeValidator(clean_string),
     Field(description="Legal gender")
 ]
 Honorific = Annotated[
@@ -87,11 +105,30 @@ Honorific = Annotated[
     BeforeValidator(clean_honorifics),
     Field(description="Legal honorifics")
 ]
+CivilStatus = Annotated[
+    Literal["Single", "Married", "Widowed", "Separated"],
+    BeforeValidator(clean_string),
+    Field(description="Legal Civil Status")
+]
 BirthDateInsured = Annotated[
     date,
     BeforeValidator(parse_date_strings),
     AfterValidator(min_age_validator(0)),
     Field(description="Insured can be any age from birth onwards")
+]
+Country = Annotated[
+    str,
+    BeforeValidator(validate_country),
+    Field(description="ISO 3166-1 alpha-3 country code", examples=["USA", "PHL", "CAN"])
+]
+TinID = Annotated[
+    str,
+    BeforeValidator(strip_id_formatting),
+    StringConstraints(
+        strip_whitespace=True,
+        pattern=r"^\d{9}$"
+    ),
+    Field(description="A 9-digit Tax Identification Number")
 ]
 
 # The Model
@@ -110,8 +147,33 @@ class QuoteRequest(BaseModel):
     # Honorific of Insured
     honorific_insured: Honorific
 
+    # Civil Status of Insured
+    civil_status_insured: CivilStatus
+
     # Birthdate of Insured
     birthdate_insured: BirthDateInsured
+
+    # Place of Birth of Insured
+    place_of_birth_insured: NameString
+
+    # Country of Citizenship of Insured
+    country_of_citizenship_insured: Country
+
+    # US Residency of Insured
+    us_resident_insured: bool
+
+    # US Passport of Insured
+    us_passport_insured: bool
+
+    # TIN of Insured
+    tin_insured: TinID
+
+    # To avoid printing sensitive numbers on frontend
+    @computed_field
+    @property
+    def masked_id(self) -> str:
+        return f"{'*' * 7}{self.tin_insured[-2:]}"
+
     has_prior_claims_insured: bool
 
 # 3. Setup the AWS S3 Connection
