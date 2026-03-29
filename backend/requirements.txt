@@ -3,3 +3,5 @@ pydantic
 boto3
 mangum
 pycountry
+pydantic[email]
+phonenumbers
