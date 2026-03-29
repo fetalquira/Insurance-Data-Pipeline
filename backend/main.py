@@ -1,12 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import phonenumbers
 from pydantic import (
     BaseModel,
     Field,
     StringConstraints,
     BeforeValidator,
     AfterValidator,
-    computed_field
+    field_validator,
+    computed_field,
+    EmailStr
 )
 from typing import (
     Literal,
@@ -23,7 +26,7 @@ from datetime import datetime, date
 
 
 # 1. Initialize the App
-app = FastAPI(title="Hilaga Timog Cheese Insurance API")
+app = FastAPI(title="HilTim Cheese Insurance API")
 
 # Allow our future Streamlit app to talk to this API without being blocked
 app.add_middleware(
@@ -93,6 +96,31 @@ def strip_id_formatting(v: Any) -> Any:
         return v.replace("-", "").replace(" ", "")
     return v
 
+def ensure_lower(v: str) -> str:
+    return v.lower().strip()
+
+def validate_phone(v: Any) -> str:
+    if not isinstance(v, str):
+        return v
+    
+    try:
+        parsed_number = phonenumbers.parse(v, "PH")
+
+        if not phonenumbers.is_valid_number(parsed_number):
+            raise ValueError("Invalid phone number format.")
+        
+        return phonenumbers.format_number(
+            parsed_number, phonenumbers.PhoneNumberFormat.E164
+        )
+    except Exception:
+        raise ValueError("Could not parse phone number.")
+
+def IsMobile(v: str) -> str:
+    parsed = phonenumbers.parse(v)
+    if phonenumbers.number_type(parsed) != phonenumbers.PhoneNumberType.MOBILE:
+        raise ValueError("Must be a mobile number")
+    return v
+
 # Annotations for Reusability
 NameString = Annotated[str, Field(..., min_length=2, max_length=100)]
 Gender = Annotated[
@@ -110,11 +138,11 @@ CivilStatus = Annotated[
     BeforeValidator(clean_string),
     Field(description="Legal Civil Status")
 ]
-BirthDateInsured = Annotated[
+BirthDate = Annotated[
     date,
     BeforeValidator(parse_date_strings),
     AfterValidator(min_age_validator(0)),
-    Field(description="Insured can be any age from birth onwards")
+    Field(description="Insured/Owner can be any age from birth onwards")
 ]
 Country = Annotated[
     str,
@@ -130,51 +158,104 @@ TinID = Annotated[
     ),
     Field(description="A 9-digit Tax Identification Number")
 ]
+ZipCode = Annotated[
+    str,
+    StringConstraints(pattern=r"^\d{4}$"),
+    Field(description="4-digit PH Zip Code")
+]
+Region = Annotated[
+    Literal[
+        "NCR",
+        "CAR",
+        "Region I",
+        "Region II",
+        "Region III",
+        "Region IV-A",
+        "MIMAROPA",
+        "Region V",
+        "Region VI",
+        "Region VII",
+        "Region VIII",
+        "NIR",
+        "Region IX",
+        "Region X",
+        "Region XI",
+        "Region XII",
+        "SOCCSKSARGEN",
+        "CARAGA",
+        "BARMM"
+    ],
+    Field(..., min_length=2, max_length=20, description="Official Regions of the Philippines")
+]
+EmailAdd = Annotated[
+    EmailStr,
+    AfterValidator(ensure_lower),
+    Field(description="Primary contact email", examples=["applicant@example.com"])
+]
+PhoneNumber = Annotated[
+    str,
+    BeforeValidator(validate_phone),
+    Field(description="Standardized E.164 phone number", examples=["+639171234567"])
+]
+MobileNumber = Annotated[PhoneNumber, AfterValidator(IsMobile)]
 
 # The Model
 class QuoteRequest(BaseModel):
     # Part 1: Application for Insurance
-    # Personal Information of the Proposed Insured
+    # Personal Information of the Proposed Insured/Owner
+    # We'll assume that Insured is always the same as the Owner
 
-    # Full name of Insured
-    first_name_insured: NameString
-    last_name_insured: NameString
-    middle_name_insured: NameString
+    # Full name
+    first_name: NameString
+    last_name: NameString
+    middle_name: NameString
 
-    # Gender of Insured
-    gender_insured: Gender
+    # Gender
+    gender: Gender
 
-    # Honorific of Insured
-    honorific_insured: Honorific
+    # Honorific
+    honorific: Honorific
 
-    # Civil Status of Insured
-    civil_status_insured: CivilStatus
+    # Civil Status
+    civil_status: CivilStatus
 
-    # Birthdate of Insured
-    birthdate_insured: BirthDateInsured
+    # Birthdate
+    birthdate: BirthDate
 
-    # Place of Birth of Insured
-    place_of_birth_insured: NameString
+    # Place of Birth
+    place_of_birth: NameString
 
-    # Country of Citizenship of Insured
-    country_of_citizenship_insured: Country
+    # Country of Citizenship
+    country_of_citizenship: Country
 
-    # US Residency of Insured
-    us_resident_insured: bool
+    # US Residency
+    us_resident: bool
 
-    # US Passport of Insured
-    us_passport_insured: bool
+    # US Passport
+    us_passport: bool
 
-    # TIN of Insured
-    tin_insured: TinID
+    # TIN
+    tin: TinID
 
     # To avoid printing sensitive numbers on frontend
     @computed_field
     @property
     def masked_id(self) -> str:
-        return f"{'*' * 7}{self.tin_insured[-2:]}"
+        return f"{'*' * 7}{self.tin[-2:]}"
+    
+    # Address
+    street_address: str = Field(..., min_length=5, max_length=100)
+    barangay: str = Field(..., min_length=2, max_length=100)
+    city: str = Field(..., min_length=2)
+    region: Region
+    zip_code: ZipCode
 
-    has_prior_claims_insured: bool
+    #E-mail Address
+    email: EmailAdd
+
+    # Phone Numbers
+    mobile_number: MobileNumber
+    landline_number: Optional[PhoneNumber] = None
 
 # 3. Setup the AWS S3 Connection
 # Boto3 will automatically use the IAM Role we attach to the Lambda function later!
