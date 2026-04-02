@@ -22,7 +22,8 @@ import boto3
 import json
 import uuid
 import pycountry
-from datetime import datetime, date
+from datetime import datetime, date, UTC
+from enum import Enum
 
 
 # 1. Initialize the App
@@ -121,6 +122,67 @@ def IsMobile(v: str) -> str:
         raise ValueError("Must be a mobile number")
     return v
 
+class PhRegion(str, Enum):
+    # LUZON
+    NCR = "National Capital Region (NCR)"
+    CAR = "Cordillera Administrative Region (CAR)"
+    R1 = "Region I (Ilocos Region)"
+    R2 = "Region II (Cagayan Valley)"
+    R3 = "Region III (Central Luzon)"
+    R4A = "Region IV-A (CALABARZON)"
+    MIMAROPA = "MIMAROPA Region"
+    R5 = "Region V (Bicol Region)"
+    
+    # VISAYAS
+    R6 = "Region VI (Western Visayas)"
+    NIR = "Negros Island Region (NIR)"
+    R7 = "Region VII (Central Visayas)"
+    R8 = "Region VIII (Eastern Visayas)"
+    
+    # MINDANAO
+    R9 = "Region IX (Zamboanga Peninsula)"
+    R10 = "Region X (Northern Mindanao)"
+    R11 = "Region XI (Davao Region)"
+    R12 = "Region XII (SOCCSKSARGEN)"
+    CARAGA = "Region XIII (Caraga)"
+    BARMM = "Bangsamoro Autonomous Region in Muslim Mindanao (BARMM)"
+
+# Define Income Enum
+class MonthlyIncomeRange(str, Enum):
+    UNDER_10K = "Under ₱10,000"
+    RANGE_10K_25K = "₱10,000 - ₱25,000"
+    RANGE_25K_50K = "₱25,000 - ₱50,000"
+    RANGE_50K_100K = "₱50,000 - ₱100,000"
+    RANGE_100K_200K = "₱100,000 - ₱200,000"
+    RANGE_200K_500K = "₱200,000 - ₱500,000"
+    RANGE_500K_1M = "₱500,000 - ₱1,000,000"
+    OVER_1M = "Over ₱1,000,000"
+
+    # Map MonthlyIncomeRange Enum to a Numeric Value
+    @property
+    def min_income_value(self) -> int:
+        """Converts the range selection into a conservative numeric floor."""
+        mapping = {
+            MonthlyIncomeRange.UNDER_10K: 0,
+            MonthlyIncomeRange.RANGE_10K_25K: 10000,
+            MonthlyIncomeRange.RANGE_25K_50K: 25000,
+            MonthlyIncomeRange.RANGE_50K_100K: 50000,
+            MonthlyIncomeRange.RANGE_100K_200K: 100000,
+            MonthlyIncomeRange.RANGE_200K_500K: 200000,
+            MonthlyIncomeRange.RANGE_500K_1M: 500000,
+            MonthlyIncomeRange.OVER_1M: 1000000
+        }
+        return mapping.get(self, 0)
+    
+class IncomeSource(str, Enum):
+    SALARY = "Salary"
+    BUSINESS = "Business"
+    PROFESSIONAL_FEES = "Professional Fees"
+    SAVINGS_INVESTMENTS = "Savings/Investments"
+    SALES_COMMISSIONS = "Sales Commissions"
+    SEAFARER_ALLOTMENT = "Allotment from Seafarer"
+    ABROAD_REMITTANCE = "Remittance from Abroad"
+
 # Annotations for Reusability
 NameString = Annotated[str, Field(..., min_length=2, max_length=100)]
 Gender = Annotated[
@@ -164,28 +226,8 @@ ZipCode = Annotated[
     Field(description="4-digit PH Zip Code")
 ]
 Region = Annotated[
-    Literal[
-        "NCR",
-        "CAR",
-        "Region I",
-        "Region II",
-        "Region III",
-        "Region IV-A",
-        "MIMAROPA",
-        "Region V",
-        "Region VI",
-        "Region VII",
-        "Region VIII",
-        "NIR",
-        "Region IX",
-        "Region X",
-        "Region XI",
-        "Region XII",
-        "SOCCSKSARGEN",
-        "CARAGA",
-        "BARMM"
-    ],
-    Field(..., min_length=2, max_length=20, description="Official Regions of the Philippines")
+    PhRegion,
+    Field(description="Official Administrative Regions of the Philippines")
 ]
 EmailAdd = Annotated[
     EmailStr,
@@ -257,6 +299,21 @@ class QuoteRequest(BaseModel):
     mobile_number: MobileNumber
     landline_number: Optional[PhoneNumber] = None
 
+    # Occupation
+    occupation: NameString
+
+    # Company Name
+    company_name: NameString
+
+    # Monthly Income
+    monthly_income: MonthlyIncomeRange
+
+    # Source of Income
+    source_of_income: IncomeSource
+
+    # Mother's Maiden Name
+    mother_maiden_name: NameString
+
 # 3. Setup the AWS S3 Connection
 # Boto3 will automatically use the IAM Role we attach to the Lambda function later!
 s3_client = boto3.client('s3')
@@ -272,7 +329,7 @@ async def submit_quote(quote: QuoteRequest):
         data_dict = quote.model_dump(mode='json')
         
         # Add a timestamp so we know exactly when this lead came in
-        data_dict["timestamp"] = datetime.utcnow().isoformat()
+        data_dict["timestamp"] = datetime.now(UTC).isoformat()
         
         # Create a totally unique file name (e.g., quote_abc123.json)
         # We add "quotes/raw/" to the beginning of the file name to organize the files
