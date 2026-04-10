@@ -1,5 +1,6 @@
-# 1. Pull the official AWS Lambda Python 3.10 image
-FROM public.ecr.aws/lambda/python:3.10
+# 1. Pull the official AWS Lambda Python 3.12 image
+# Python 3.12 is needed for the latest UTC module
+FROM public.ecr.aws/lambda/python:3.12
 
 # 2. Copy our requirements file into the container
 COPY requirements.txt ${LAMBDA_TASK_ROOT}
