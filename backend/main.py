@@ -6,8 +6,8 @@ from pydantic import (
     Field,
     StringConstraints,
     BeforeValidator,
+    model_validator,
     AfterValidator,
-    field_validator,
     computed_field,
     EmailStr
 )
@@ -15,7 +15,9 @@ from typing import (
     Literal,
     Optional,
     Annotated,
-    Any
+    Any,
+    ClassVar,
+    Union
 )
 from mangum import Mangum
 import boto3
@@ -188,7 +190,7 @@ NameString = Annotated[str, Field(..., min_length=2, max_length=100)]
 Gender = Annotated[
     Literal["Male", "Female"],
     BeforeValidator(clean_string),
-    Field(description="Legal gender")
+    Field(..., description="Legal gender")
 ]
 Honorific = Annotated[
     Literal["Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Rev.", "Hon.", "Engr.", "Ar."],
@@ -198,18 +200,18 @@ Honorific = Annotated[
 CivilStatus = Annotated[
     Literal["Single", "Married", "Widowed", "Separated"],
     BeforeValidator(clean_string),
-    Field(description="Legal Civil Status")
+    Field(..., description="Legal Civil Status")
 ]
 BirthDate = Annotated[
     date,
     BeforeValidator(parse_date_strings),
     AfterValidator(min_age_validator(0)),
-    Field(description="Insured/Owner can be any age from birth onwards")
+    Field(..., description="Insured/Owner can be any age from birth onwards")
 ]
 Country = Annotated[
     str,
     BeforeValidator(validate_country),
-    Field(description="ISO 3166-1 alpha-3 country code", examples=["USA", "PHL", "CAN"])
+    Field(..., description="ISO 3166-1 alpha-3 country code", examples=["USA", "PHL", "CAN"])
 ]
 TinID = Annotated[
     str,
@@ -223,11 +225,11 @@ TinID = Annotated[
 ZipCode = Annotated[
     str,
     StringConstraints(pattern=r"^\d{4}$"),
-    Field(description="4-digit PH Zip Code")
+    Field(..., description="4-digit PH Zip Code")
 ]
 Region = Annotated[
     PhRegion,
-    Field(description="Official Administrative Regions of the Philippines")
+    Field(..., description="Official Administrative Regions of the Philippines")
 ]
 EmailAdd = Annotated[
     EmailStr,
@@ -237,9 +239,13 @@ EmailAdd = Annotated[
 PhoneNumber = Annotated[
     str,
     BeforeValidator(validate_phone),
-    Field(description="Standardized E.164 phone number", examples=["+639171234567"])
+    Field(..., description="Standardized E.164 phone number", examples=["+639171234567"])
 ]
 MobileNumber = Annotated[PhoneNumber, AfterValidator(IsMobile)]
+AnnualIncome = Annotated[
+    float,
+    Field(..., gt=0, description="Annual Income for computation of maximum insurance coverage")
+]
 
 # The Model
 class QuoteRequest(BaseModel):
@@ -305,14 +311,130 @@ class QuoteRequest(BaseModel):
     # Company Name
     company_name: NameString
 
-    # Monthly Income
+    # Monthly Income Range
+    # Keeping this despite asking for Annual Income as a practice for StrEnum class
     monthly_income: MonthlyIncomeRange
+
+    # Annual Income
+    # Centralized the field since the insurance company is a Life Insurance company
+    annual_income: AnnualIncome
 
     # Source of Income
     source_of_income: IncomeSource
 
     # Mother's Maiden Name
     mother_maiden_name: NameString
+
+    # Max Coverage (simple placeholder, but definitely can align with regulatory standards)
+    @computed_field
+    def max_coverage(self) -> float:
+        return self.annual_income * 10
+
+# Life Insurance Products
+# Term Life Product: Fortis Pure Life
+class FortisPureLife(QuoteRequest):
+    product_type: Literal["term_life"]
+    product_code: Literal["HTC-TLIF-001"] = "HTC-TLIF-001"
+
+    # Centralized Internal Constants
+    # This is necessary so that pydantic doesn't expose variables BUT they're still centralized
+    BASE_RATE: ClassVar[float] = 500.0
+    COST_PER_THOUSAND: ClassVar[float] = 25.0
+
+    # Mutually Exclusive Inputs (Both are Optional)
+    requested_coverage: Optional[float] = Field(None, gt=0, description="Needs-driven approach")
+    target_monthly_premium: Optional[float] = Field(None, gt=0, description="Budget-driven approach")
+
+    # XOR logic on whichever the client wants
+    @model_validator(mode='after')
+    def enforce_exclusive_inputs(self):
+        # Return an error if they provided both.
+        if self.requested_coverage is not None and self.target_monthly_premium is not None:
+            raise ValueError("You cannot provide both a target premium and a requested coverage.")
+        
+        # Return an error if they didn't provide any of both.
+        if self.requested_coverage is None and self.target_monthly_premium is None:
+            raise ValueError("You must provide either a target premium or a requested coverage.")
+        
+        return self
+    
+    @computed_field
+    def calculated_coverage(self) -> float:
+        """If they asked for coverage, return it. If they gave a budget, compute the average."""
+        if self.requested_coverage is not None:
+            return self.requested_coverage
+        
+        available_for_insurance = self.target_monthly_premium - self.BASE_RATE
+
+        if available_for_insurance <= 0:
+            raise ValueError(f"Budget is too low to cover the base policy fee of PHP{self.BASE_RATE}")
+        
+        return (available_for_insurance / self.COST_PER_THOUSAND) * 50000.0
+    
+    @computed_field
+    def calculated_premium(self) -> float:
+        """Calculated the monthly premium from their requested coverage."""
+        if self.target_monthly_premium is not None:
+            return self.target_monthly_premium
+        
+        coverage_cost = (self.requested_coverage / 50000.0) * self.COST_PER_THOUSAND
+        return self.BASE_RATE + coverage_cost
+
+# VUL Product: Nexus Wealth
+# This can be changed in a future release, but for now, this product will be similar to Term-Life
+class NexusWealth(QuoteRequest):
+    product_type: Literal["variable_life"]
+    product_code: Literal["HTC-VULF-001"] = "HTC-VULF-001"
+
+    # Centralized Internal Constants
+    # This is necessary so that pydantic doesn't expose variables BUT they're still centralized
+    BASE_RATE: ClassVar[float] = 1000.0
+    COST_PER_THOUSAND: ClassVar[float] = 50.0
+
+    # Mutually Exclusive Inputs (Both are Optional)
+    requested_coverage: Optional[float] = Field(None, gt=0, description="Needs-driven approach")
+    target_monthly_premium: Optional[float] = Field(None, gt=0, description="Budget-driven approach")
+
+    # XOR logic on whichever the client wants
+    @model_validator(mode='after')
+    def enforce_exclusive_inputs(self):
+        # Return an error if they provided both.
+        if self.requested_coverage is not None and self.target_monthly_premium is not None:
+            raise ValueError("You cannot provide both a target premium and a requested coverage.")
+        
+        # Return an error if they didn't provide any of both.
+        if self.requested_coverage is None and self.target_monthly_premium is None:
+            raise ValueError("You must provide either a target premium or a requested coverage.")
+        
+        return self
+    
+    @computed_field
+    def calculated_coverage(self) -> float:
+        """If they asked for coverage, return it. If they gave a budget, compute the average."""
+        if self.requested_coverage is not None:
+            return self.requested_coverage
+        
+        available_for_insurance = self.target_monthly_premium - self.BASE_RATE
+
+        if available_for_insurance <= 0:
+            raise ValueError(f"Budget is too low to cover the base policy fee of PHP{self.BASE_RATE}")
+        
+        return (available_for_insurance / self.COST_PER_THOUSAND) * 50000.0
+    
+    @computed_field
+    def calculated_premium(self) -> float:
+        """Calculated the monthly premium from their requested coverage."""
+        if self.target_monthly_premium is not None:
+            return self.target_monthly_premium
+        
+        coverage_cost = (self.requested_coverage / 50000.0) * self.COST_PER_THOUSAND
+        return self.BASE_RATE + coverage_cost
+
+# The Annotated that acts as a switchboard for the product suite we have for our insurance company
+AnyQuote = Annotated[
+    Union[FortisPureLife, NexusWealth],
+    Field(discriminator="product_type")
+]
 
 # 3. Setup the AWS S3 Connection
 # Boto3 will automatically use the IAM Role we attach to the Lambda function later!
@@ -323,7 +445,7 @@ BUCKET_NAME = "hiltim-cheese-insurance"
 
 # 4. Create the API Endpoint
 @app.post("/submit-quote")
-async def submit_quote(quote: QuoteRequest):
+async def submit_quote(quote: AnyQuote):
     try:
         # Convert the validated Pydantic model into a Python dictionary
         data_dict = quote.model_dump(mode='json')
