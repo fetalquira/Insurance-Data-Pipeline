@@ -15,3 +15,5 @@ pipeline.log
 test.py
 plan_of_attack.md
 *.pdf
+scratch/
+secrets.toml
