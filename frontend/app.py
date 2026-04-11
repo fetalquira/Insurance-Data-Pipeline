@@ -3,7 +3,9 @@ import requests
 import os
 
 
-API_URL = os.getenv("AWS_API_GATEWAY")
+# Cloud Variables
+API_URL = os.getenv("AWS_API_GATEWAY") or st.secrets["AWS_API_GATEWAY"]
+API_KEY = os.getenv("SECRET_API_KEY") or st.secrets["SECRET_API_KEY"]
 
 # UI Branding
 st.set_page_config(page_title="HilTim Cheese Insurance", page_icon="🛡️")
