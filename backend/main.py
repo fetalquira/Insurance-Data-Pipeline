@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Security
+from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 import phonenumbers
 from pydantic import (
@@ -17,11 +18,13 @@ from typing import (
     Annotated,
     Any,
     ClassVar,
-    Union
+    Union,
+    Self
 )
 from mangum import Mangum
 import boto3
 import json
+import os
 import uuid
 import pycountry
 from datetime import datetime, date, UTC
@@ -29,7 +32,22 @@ from enum import Enum
 
 
 # 1. Initialize the App
+SECRET_API_KEY = os.getenv("SECRET_API_KEY")
+
+# A "Fail on Boot" check to ensure security
+if not SECRET_API_KEY:
+    raise ValueError("CRITICAL: API_KEY environment variable is missing. Halting server.")
+
+# Initialize FastAPI
 app = FastAPI(title="HilTim Cheese Insurance API")
+
+# Implement security measures for API
+api_key_scheme = APIKeyHeader(name="x-api-key")
+
+def verify_api_key(api_key: str = Security(api_key_scheme)):
+    if api_key != SECRET_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid API Key")
+    return api_key
 
 # Allow our future Streamlit app to talk to this API without being blocked
 app.add_middleware(
@@ -211,7 +229,7 @@ BirthDate = Annotated[
 Country = Annotated[
     str,
     BeforeValidator(validate_country),
-    Field(..., description="ISO 3166-1 alpha-3 country code", examples=["USA", "PHL", "CAN"])
+    Field(default="PHL", description="ISO 3166-1 alpha-3 country code", examples=["PHL", "KOR", "JPN"])
 ]
 TinID = Annotated[
     str,
@@ -220,7 +238,7 @@ TinID = Annotated[
         strip_whitespace=True,
         pattern=r"^\d{9}$"
     ),
-    Field(description="A 9-digit Tax Identification Number")
+    Field(default="000000000", description="A 9-digit Tax Identification Number")
 ]
 ZipCode = Annotated[
     str,
@@ -325,14 +343,68 @@ class QuoteRequest(BaseModel):
     # Mother's Maiden Name
     mother_maiden_name: NameString
 
+    # Assign a default BASE_RATE and COST_PER_THOUSAND, later to be overriden by child product classes
+    BASE_RATE: ClassVar[float] = 0.0
+    COST_PER_THOUSAND: ClassVar[float] = 0.0
+
+    # MULTIPLIER for max_coverage; can be changed later if needed
+    MULTIPLIER: ClassVar[float] = 10
+
     # Max Coverage (simple placeholder, but definitely can align with regulatory standards)
     @computed_field
     def max_coverage(self) -> float:
-        return self.annual_income * 10
+        return self.annual_income * self.MULTIPLIER
+    
+    # Mutually Exclusive Inputs (Both are Optional)
+    requested_coverage: Optional[float] = Field(None, gt=0, description="Needs-driven approach")
+    target_monthly_premium: Optional[float] = Field(None, gt=0, description="Budget-driven approach")
+
+    # XOR logic on whichever the client wants
+    @model_validator(mode='after')
+    def enforce_exclusive_inputs(self) -> Self:
+        # Return an error if they provided both.
+        if self.requested_coverage is not None and self.target_monthly_premium is not None:
+            raise ValueError("You cannot provide both a target premium and a requested coverage.")
+        
+        # Return an error if they didn't provide any of both.
+        if self.requested_coverage is None and self.target_monthly_premium is None:
+            raise ValueError("You must provide either a target premium or a requested coverage.")
+        
+        return self
+    
+    @computed_field
+    def calculated_coverage(self) -> float:
+        """If they asked for coverage, return it. If they gave a budget, compute the average."""
+        if self.requested_coverage is not None:
+            return self.requested_coverage
+        
+        available_for_insurance = self.target_monthly_premium - self.BASE_RATE
+
+        if available_for_insurance <= 0:
+            raise ValueError(f"Budget is too low to cover the base policy fee of PHP{self.BASE_RATE}")
+        
+        return (available_for_insurance / self.COST_PER_THOUSAND) * 50000.0
+    
+    @computed_field
+    def calculated_premium(self) -> float:
+        """Calculated the monthly premium from their requested coverage."""
+        if self.target_monthly_premium is not None:
+            return self.target_monthly_premium
+        
+        coverage_cost = (self.requested_coverage / 50000.0) * self.COST_PER_THOUSAND
+        return self.BASE_RATE + coverage_cost
+    
+    @model_validator(mode='after')
+    def validate_max_coverage(self) -> Self:
+        # This dynamically uses the MULTIPLIER of the subclass, but will use parent's MULTIPLIER if not provided
+        if self.calculated_coverage > self.max_coverage:
+            raise ValueError(f"Exceeds {self.MULTIPLIER}x income limit.")
+        return self
 
 # Life Insurance Products
 # Term Life Product: Fortis Pure Life
 class FortisPureLife(QuoteRequest):
+    product_name: Literal["Fortis Pure Life"] = "Fortis Pure Life"
     product_type: Literal["term_life"]
     product_code: Literal["HTC-TLIF-001"] = "HTC-TLIF-001"
 
@@ -341,48 +413,10 @@ class FortisPureLife(QuoteRequest):
     BASE_RATE: ClassVar[float] = 500.0
     COST_PER_THOUSAND: ClassVar[float] = 25.0
 
-    # Mutually Exclusive Inputs (Both are Optional)
-    requested_coverage: Optional[float] = Field(None, gt=0, description="Needs-driven approach")
-    target_monthly_premium: Optional[float] = Field(None, gt=0, description="Budget-driven approach")
-
-    # XOR logic on whichever the client wants
-    @model_validator(mode='after')
-    def enforce_exclusive_inputs(self):
-        # Return an error if they provided both.
-        if self.requested_coverage is not None and self.target_monthly_premium is not None:
-            raise ValueError("You cannot provide both a target premium and a requested coverage.")
-        
-        # Return an error if they didn't provide any of both.
-        if self.requested_coverage is None and self.target_monthly_premium is None:
-            raise ValueError("You must provide either a target premium or a requested coverage.")
-        
-        return self
-    
-    @computed_field
-    def calculated_coverage(self) -> float:
-        """If they asked for coverage, return it. If they gave a budget, compute the average."""
-        if self.requested_coverage is not None:
-            return self.requested_coverage
-        
-        available_for_insurance = self.target_monthly_premium - self.BASE_RATE
-
-        if available_for_insurance <= 0:
-            raise ValueError(f"Budget is too low to cover the base policy fee of PHP{self.BASE_RATE}")
-        
-        return (available_for_insurance / self.COST_PER_THOUSAND) * 50000.0
-    
-    @computed_field
-    def calculated_premium(self) -> float:
-        """Calculated the monthly premium from their requested coverage."""
-        if self.target_monthly_premium is not None:
-            return self.target_monthly_premium
-        
-        coverage_cost = (self.requested_coverage / 50000.0) * self.COST_PER_THOUSAND
-        return self.BASE_RATE + coverage_cost
-
 # VUL Product: Nexus Wealth
 # This can be changed in a future release, but for now, this product will be similar to Term-Life
 class NexusWealth(QuoteRequest):
+    product_name: Literal["Nexus Wealth"] = "Nexus Wealth"
     product_type: Literal["variable_life"]
     product_code: Literal["HTC-VULF-001"] = "HTC-VULF-001"
 
@@ -390,45 +424,6 @@ class NexusWealth(QuoteRequest):
     # This is necessary so that pydantic doesn't expose variables BUT they're still centralized
     BASE_RATE: ClassVar[float] = 1000.0
     COST_PER_THOUSAND: ClassVar[float] = 50.0
-
-    # Mutually Exclusive Inputs (Both are Optional)
-    requested_coverage: Optional[float] = Field(None, gt=0, description="Needs-driven approach")
-    target_monthly_premium: Optional[float] = Field(None, gt=0, description="Budget-driven approach")
-
-    # XOR logic on whichever the client wants
-    @model_validator(mode='after')
-    def enforce_exclusive_inputs(self):
-        # Return an error if they provided both.
-        if self.requested_coverage is not None and self.target_monthly_premium is not None:
-            raise ValueError("You cannot provide both a target premium and a requested coverage.")
-        
-        # Return an error if they didn't provide any of both.
-        if self.requested_coverage is None and self.target_monthly_premium is None:
-            raise ValueError("You must provide either a target premium or a requested coverage.")
-        
-        return self
-    
-    @computed_field
-    def calculated_coverage(self) -> float:
-        """If they asked for coverage, return it. If they gave a budget, compute the average."""
-        if self.requested_coverage is not None:
-            return self.requested_coverage
-        
-        available_for_insurance = self.target_monthly_premium - self.BASE_RATE
-
-        if available_for_insurance <= 0:
-            raise ValueError(f"Budget is too low to cover the base policy fee of PHP{self.BASE_RATE}")
-        
-        return (available_for_insurance / self.COST_PER_THOUSAND) * 50000.0
-    
-    @computed_field
-    def calculated_premium(self) -> float:
-        """Calculated the monthly premium from their requested coverage."""
-        if self.target_monthly_premium is not None:
-            return self.target_monthly_premium
-        
-        coverage_cost = (self.requested_coverage / 50000.0) * self.COST_PER_THOUSAND
-        return self.BASE_RATE + coverage_cost
 
 # The Annotated that acts as a switchboard for the product suite we have for our insurance company
 AnyQuote = Annotated[
@@ -445,7 +440,7 @@ BUCKET_NAME = "hiltim-cheese-insurance"
 
 # 4. Create the API Endpoint
 @app.post("/submit-quote")
-async def submit_quote(quote: AnyQuote):
+async def submit_quote(quote: AnyQuote, api_key: str = Security(verify_api_key)):
     try:
         # Convert the validated Pydantic model into a Python dictionary
         data_dict = quote.model_dump(mode='json')
