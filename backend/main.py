@@ -39,7 +39,7 @@ if not SECRET_API_KEY:
     raise ValueError("CRITICAL: API_KEY environment variable is missing. Halting server.")
 
 # Initialize FastAPI
-app = FastAPI(title="HilTim Cheese Insurance API")
+app = FastAPI(title="HilTim Cheese Insurance API", root_path="/prod")
 
 # Implement security measures for API
 api_key_scheme = APIKeyHeader(name="x-api-key")
